@@ -1,0 +1,46 @@
+-- Run in a Snowsight SQL worksheet (as ACCOUNTADMIN on your trial account).
+
+-- 1) Database, schema, warehouse (XS + auto-suspend keeps trial credits safe)
+CREATE DATABASE IF NOT EXISTS VOTER_DB;
+CREATE SCHEMA   IF NOT EXISTS VOTER_DB.TURNOUT;
+CREATE WAREHOUSE IF NOT EXISTS VOTER_WH
+  WAREHOUSE_SIZE = 'XSMALL' AUTO_SUSPEND = 60 AUTO_RESUME = TRUE INITIALLY_SUSPENDED = TRUE;
+
+-- 2) Least-privilege role + service user for the website API
+CREATE ROLE IF NOT EXISTS VOTER_API_ROLE;
+GRANT USAGE ON WAREHOUSE VOTER_WH TO ROLE VOTER_API_ROLE;
+GRANT USAGE ON DATABASE  VOTER_DB TO ROLE VOTER_API_ROLE;
+GRANT USAGE ON SCHEMA    VOTER_DB.TURNOUT TO ROLE VOTER_API_ROLE;
+GRANT SELECT ON FUTURE VIEWS  IN SCHEMA VOTER_DB.TURNOUT TO ROLE VOTER_API_ROLE;
+GRANT SELECT ON FUTURE TABLES IN SCHEMA VOTER_DB.TURNOUT TO ROLE VOTER_API_ROLE;
+
+-- Key-pair auth (recommended; new accounts often block password-only logins).
+-- Generate a key locally first (see README), then paste the PUBLIC key body below.
+CREATE USER IF NOT EXISTS VOTER_API_USER
+  TYPE = SERVICE
+  DEFAULT_ROLE = VOTER_API_ROLE
+  DEFAULT_WAREHOUSE = VOTER_WH
+  RSA_PUBLIC_KEY = '<PASTE_PUBLIC_KEY_BODY_HERE>';
+GRANT ROLE VOTER_API_ROLE TO USER VOTER_API_USER;
+
+-- 3) LOAD THE DATA (UI step):
+--    Snowsight > Data > Add Data > "Load data into a table"
+--    Upload the turnout CSV, pick VOTER_DB.TURNOUT, create new table RAW_TURNOUT,
+--    let Snowsight infer the columns. Then run:  DESC TABLE VOTER_DB.TURNOUT.RAW_TURNOUT;
+
+-- 4) Clean view the API reads. EDIT the right-hand column names to match DESC output.
+USE SCHEMA VOTER_DB.TURNOUT;
+CREATE OR REPLACE VIEW TURNOUT_CLEAN AS
+SELECT
+  YEAR::INT                              AS YEAR,
+  STATE                                  AS STATE,
+  TRY_TO_DOUBLE(REPLACE(VEP_TURNOUT_RATE, '%', ''))  AS TURNOUT_PCT   -- <-- adjust
+FROM RAW_TURNOUT
+WHERE STATE IS NOT NULL AND STATE <> 'United States';
+
+-- If the rate is stored as 0.62 instead of 62, multiply by 100 above.
+GRANT SELECT ON VIEW TURNOUT_CLEAN TO ROLE VOTER_API_ROLE;
+
+-- Sanity check
+SELECT YEAR, COUNT(*) AS STATES, ROUND(AVG(TURNOUT_PCT),1) AS AVG_PCT
+FROM TURNOUT_CLEAN GROUP BY YEAR ORDER BY YEAR;

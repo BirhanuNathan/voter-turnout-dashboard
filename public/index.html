@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voter Turnout Explorer</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#fafaf7; --card:#fff; --ink:#1c1c1a; --muted:#6b6b66; --line:#e4e4de; --accent:#2a6f97; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161614; --card:#1f1f1c; --ink:#ececE6; --muted:#9a9a92; --line:#33332f; --accent:#6ab0d8; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,sans-serif; }
+  main { max-width:1000px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  p.sub { margin:0 0 20px; color:var(--muted); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+  .controls { display:grid; gap:12px; grid-template-columns:1fr 1fr; }
+  @media (max-width:640px){ .controls{grid-template-columns:1fr;} }
+  label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; text-transform:uppercase; letter-spacing:.04em; }
+  select { width:100%; padding:8px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--ink); font:inherit; }
+  select[multiple] { height:150px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+  button { padding:6px 12px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--ink); cursor:pointer; font:inherit; }
+  button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .chart-box { position:relative; height:340px; }
+  h2 { font-size:15px; margin:0 0 10px; }
+  #msg { color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Voter Turnout Explorer</h1>
+  <p class="sub">Voting-eligible population turnout, U.S. general elections. Data served from Snowflake.</p>
+  <p id="msg">Loading data…</p>
+
+  <div class="card controls" id="controls" hidden>
+    <div>
+      <label for="states">States (Ctrl/Cmd-click for multiple)</label>
+      <select id="states" multiple></select>
+      <div class="row">
+        <button id="clear">Clear</button>
+        <button id="top5">Top 5 latest</button>
+      </div>
+    </div>
+    <div>
+      <label for="yearSel">Year for bar comparison</label>
+      <select id="yearSel"></select>
+      <div class="row" style="margin-top:14px">
+        <button data-type="all" class="on">All elections</button>
+        <button data-type="pres">Presidential</button>
+        <button data-type="mid">Midterm</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="c1" hidden><h2>Turnout over time</h2><div class="chart-box"><canvas id="line"></canvas></div></div>
+  <div class="card" id="c2" hidden><h2 id="barTitle">Turnout by state</h2><div class="chart-box"><canvas id="bar"></canvas></div></div>
+</main>
+
+<script>
+const PALETTE = ['#2a6f97','#e07a1f','#3a9d5d','#b5446e','#7a5cc2','#c9a227','#4a9fa8','#a0522d'];
+let data = [], lineChart, barChart, typeFilter = 'all';
+const $ = id => document.getElementById(id);
+const isPres = y => y % 4 === 0;
+const keep = y => typeFilter === 'all' || (typeFilter === 'pres' ? isPres(y) : !isPres(y));
+
+fetch('/api/turnout').then(r => r.ok ? r.json() : Promise.reject(r.status)).then(d => {
+  data = d.filter(r => r.turnout !== null);
+  init();
+}).catch(e => { $('msg').textContent = 'Could not load data from the API (' + e + '). Check the Netlify function logs.'; });
+
+function init() {
+  const states = [...new Set(data.map(r => r.state))].sort();
+  const years = [...new Set(data.map(r => r.year))].sort((a,b)=>a-b);
+  $('states').innerHTML = states.map(s => `<option>${s}</option>`).join('');
+  $('yearSel').innerHTML = years.slice().reverse().map(y => `<option>${y}</option>`).join('');
+  [...$('states').options].filter(o => ['California','Texas','Florida'].includes(o.value)).forEach(o => o.selected = true);
+  $('msg').hidden = false; $('msg').textContent = '';
+  ['controls','c1','c2'].forEach(id => $(id).hidden = false);
+
+  $('states').onchange = $('yearSel').onchange = render;
+  $('clear').onclick = () => { [...$('states').options].forEach(o => o.selected = false); render(); };
+  $('top5').onclick = () => {
+    const y = +$('yearSel').value;
+    const top = data.filter(r => r.year === y).sort((a,b) => b.turnout - a.turnout).slice(0,5).map(r => r.state);
+    [...$('states').options].forEach(o => o.selected = top.includes(o.value)); render();
+  };
+  document.querySelectorAll('[data-type]').forEach(b => b.onclick = () => {
+    typeFilter = b.dataset.type;
+    document.querySelectorAll('[data-type]').forEach(x => x.classList.toggle('on', x === b));
+    render();
+  });
+  render();
+}
+
+function render() {
+  const sel = [...$('states').selectedOptions].map(o => o.value);
+  const years = [...new Set(data.map(r => r.year))].sort((a,b)=>a-b).filter(keep);
+
+  const datasets = sel.map((s, i) => ({
+    label: s,
+    borderColor: PALETTE[i % PALETTE.length], backgroundColor: PALETTE[i % PALETTE.length],
+    tension: .25, spanGaps: true,
+    data: years.map(y => (data.find(r => r.state === s && r.year === y) || {}).turnout ?? null),
+  }));
+  lineChart && lineChart.destroy();
+  lineChart = new Chart($('line'), {
+    type: 'line', data: { labels: years, datasets },
+    options: { maintainAspectRatio:false, interaction:{mode:'index',intersect:false},
+      scales:{ y:{ title:{display:true,text:'Turnout (%)'} } } }
+  });
+
+  const y = +$('yearSel').value;
+  $('barTitle').textContent = `Turnout by state, ${y}` + (sel.length ? ' (selected highlighted)' : '');
+  const rows = data.filter(r => r.year === y).sort((a,b) => b.turnout - a.turnout);
+  barChart && barChart.destroy();
+  barChart = new Chart($('bar'), {
+    type: 'bar',
+    data: { labels: rows.map(r => r.state), datasets: [{
+      label: 'Turnout (%)', data: rows.map(r => r.turnout),
+      backgroundColor: rows.map(r => !sel.length || sel.includes(r.state) ? '#2a6f97' : '#2a6f9744'),
+    }]},
+    options: { maintainAspectRatio:false, plugins:{legend:{display:false}},
+      scales:{ y:{ title:{display:true,text:'Turnout (%)'} }, x:{ ticks:{ maxRotation:90, minRotation:60, autoSkip:false, font:{size:9} } } } }
+  });
+}
+</script>
+</body>
+</html>
